@@ -16,9 +16,43 @@ set -euo pipefail
 
 source "$MISE_CONFIG_ROOT/lib/email.sh"
 
-# Resolve TO and SUBJECT: explicit flags override positional args
-TO="${usage_to:-${usage_to_arg:-}}"
-SUBJECT="${usage_subject:-${usage_subject_arg:-}}"
+# Resolve TO and SUBJECT: explicit flags override positional args.
+TO="${usage_to:-}"
+SUBJECT="${usage_subject:-}"
+SUBJECT_FROM_POSITIONAL=false
+
+if [ -z "$TO" ]; then
+  TO="${usage_to_arg:-}"
+fi
+if [ -z "$SUBJECT" ]; then
+  SUBJECT="${usage_subject_arg:-}"
+  [ -n "$SUBJECT" ] && SUBJECT_FROM_POSITIONAL=true
+fi
+
+json_string_field() {
+  local field="$1"
+  jq -r --arg field "$field" '
+    if has($field) and .[$field] != null then
+      if (.[$field] | type) == "string" then .[$field]
+      else error($field + " must be a string")
+      end
+    else empty end
+  ' "$usage_file"
+}
+
+json_cc_lines() {
+  jq -r '
+    if has("cc") and .cc != null then
+      if (.cc | type) == "array" then
+        if all(.cc[]; type == "string") then .cc[]
+        else error("cc array must contain only strings")
+        end
+      elif (.cc | type) == "string" then .cc
+      else error("cc must be a string or array of strings")
+      end
+    else empty end
+  ' "$usage_file"
+}
 
 # --file: load TO/SUBJECT/BODY/CC from a JSON spec
 FILE_BODY=""
@@ -28,12 +62,27 @@ if [ -n "${usage_file:-}" ]; then
     echo "Error: File not found: $usage_file"
     exit 1
   fi
-  _file_to=$(jq -r '.to // empty' "$usage_file")
-  _file_subject=$(jq -r '.subject // empty' "$usage_file")
-  FILE_BODY=$(jq -r '.body // empty' "$usage_file")
-  FILE_CC_LINES=$(jq -r 'if .cc then (.cc | if type == "array" then .[] else . end) else empty end' "$usage_file" 2>/dev/null || true)
+  if ! _file_to=$(json_string_field to); then
+    echo "Error: invalid --file to field"
+    exit 1
+  fi
+  if ! _file_subject=$(json_string_field subject); then
+    echo "Error: invalid --file subject field"
+    exit 1
+  fi
+  if ! FILE_BODY=$(json_string_field body); then
+    echo "Error: invalid --file body field"
+    exit 1
+  fi
+  if ! FILE_CC_LINES=$(json_cc_lines); then
+    echo "Error: invalid --file cc field"
+    exit 1
+  fi
   [ -n "$_file_to" ] && TO="$_file_to"
-  [ -n "$_file_subject" ] && SUBJECT="$_file_subject"
+  if [ -n "$_file_subject" ]; then
+    SUBJECT="$_file_subject"
+    SUBJECT_FROM_POSITIONAL=false
+  fi
 fi
 
 if [ -z "$TO" ] || [ -z "$SUBJECT" ]; then
@@ -62,7 +111,7 @@ fi
 
 # GHL safety check: subject that looks like an email address means two recipients
 # were passed positionally (the original GHL referral incident).
-if echo "$SUBJECT" | grep -qE '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
+if $SUBJECT_FROM_POSITIONAL && echo "$SUBJECT" | grep -qE '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
   echo "Error: subject looks like an email address: '$SUBJECT'"
   echo "Did you accidentally pass two recipients positionally?"
   echo "Use --cc for additional recipients:"
